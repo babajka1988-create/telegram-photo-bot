@@ -34,14 +34,35 @@ violations = {}
 
 DELETE_BOT_MESSAGES_AFTER = 24 * 60 * 60
 
+CHANNEL_ID = 0
+
 
 def get_user_name(user):
     if user.username:
         return f"@{user.username}"
+
     full_name = " ".join(
         part for part in [user.first_name, user.last_name] if part
     )
+
     return full_name or "Пользователь"
+
+
+def learn_channel_id_from_message(message: Message):
+    global CHANNEL_ID
+
+    forward_from_chat = getattr(message, "forward_from_chat", None)
+    if forward_from_chat and forward_from_chat.type == "channel":
+        CHANNEL_ID = forward_from_chat.id
+        print(f"Channel ID learned from forward_from_chat: {CHANNEL_ID}")
+        return
+
+    forward_origin = getattr(message, "forward_origin", None)
+    if forward_origin:
+        origin_chat = getattr(forward_origin, "chat", None)
+        if origin_chat and origin_chat.type == "channel":
+            CHANNEL_ID = origin_chat.id
+            print(f"Channel ID learned from forward_origin: {CHANNEL_ID}")
 
 
 def has_link_entities(message: Message) -> bool:
@@ -114,6 +135,7 @@ async def is_admin(message: Message) -> bool:
 
 async def delete_after_delay(message: Message, delay: int = DELETE_BOT_MESSAGES_AFTER):
     await asyncio.sleep(delay)
+
     try:
         await message.delete()
     except Exception as e:
@@ -128,15 +150,38 @@ async def send_temp_message(message: Message, text: str):
         print(f"Send temp message error: {e}")
 
 
+async def ban_user_everywhere(chat_id: int, user_id: int):
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        print(f"User {user_id} banned in discussion chat {chat_id}")
+    except Exception as e:
+        print(f"Discussion chat ban error: {e}")
+
+    if CHANNEL_ID:
+        try:
+            await bot.ban_chat_member(CHANNEL_ID, user_id)
+            print(f"User {user_id} banned in channel {CHANNEL_ID}")
+        except Exception as e:
+            print(f"Channel ban error: {e}")
+    else:
+        print("Channel ban skipped: CHANNEL_ID is not known yet")
+
+
 async def register_violation(message: Message):
+    learn_channel_id_from_message(message)
+
     try:
         await message.delete()
     except Exception as e:
         print(f"Delete violation message error: {e}")
 
     if not message.from_user:
-        chat_name = "@" + message.sender_chat.username if message.sender_chat and message.sender_chat.username else (
-            message.sender_chat.title if message.sender_chat else "Канал или чат"
+        chat_name = (
+            "@" + message.sender_chat.username
+            if message.sender_chat and message.sender_chat.username
+            else message.sender_chat.title
+            if message.sender_chat
+            else "Канал или чат"
         )
 
         await send_temp_message(
@@ -158,10 +203,7 @@ async def register_violation(message: Message):
         )
         return
 
-    try:
-        await bot.ban_chat_member(message.chat.id, user_id)
-    except Exception as e:
-        print(f"Ban violation user error: {e}")
+    await ban_user_everywhere(message.chat.id, user_id)
 
     await send_temp_message(
         message,
@@ -176,13 +218,22 @@ async def start(message: Message):
 
 @dp.message(Command("id"))
 async def show_id(message: Message):
-    await message.answer(f"ID этого чата: {message.chat.id}")
+    await message.answer(
+        f"ID чата: {message.chat.id}\n"
+        f"Тип: {message.chat.type}\n"
+        f"ID канала в памяти бота: {CHANNEL_ID if CHANNEL_ID else 'пока не определён'}"
+    )
 
 
 @dp.chat_member()
 async def block_left_channel_member(event: ChatMemberUpdated):
+    global CHANNEL_ID
+
     if event.chat.type != "channel":
         return
+
+    CHANNEL_ID = event.chat.id
+    print(f"Channel ID learned from chat_member event: {CHANNEL_ID}")
 
     old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
@@ -198,6 +249,8 @@ async def block_left_channel_member(event: ChatMemberUpdated):
 
 @dp.message(F.is_automatic_forward == True)
 async def comment_under_channel_post(message: Message):
+    learn_channel_id_from_message(message)
+
     now = time.time()
 
     for key, saved_time in list(processed_posts.items()):
@@ -221,6 +274,8 @@ async def comment_under_channel_post(message: Message):
 async def protect_chat(message: Message):
     if message.chat.type not in ("group", "supergroup"):
         return
+
+    learn_channel_id_from_message(message)
 
     if message.from_user and message.from_user.is_bot:
         return
